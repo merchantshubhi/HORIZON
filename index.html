@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<title>Horizon Horizon</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; color: #f5e6d3;
+    font-family: system-ui, sans-serif; }
+  .screen { display: none; min-height: 100%; padding: 24px; box-sizing: border-box;
+    flex-direction: column; justify-content: center; align-items: center;
+    text-align: center; gap: 16px; }
+  .screen.active { display: flex; }
+  h1 { margin: 0; font-weight: 600; }
+  p { max-width: 32ch; line-height: 1.5; opacity: .85; }
+  button, label.btn { background: #ff9a3c; color: #000; border: 0; border-radius: 999px;
+    padding: 14px 28px; font-size: 1.05rem; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: #f5e6d3; border: 1px solid #555; }
+  button:disabled { opacity: .5; }
+  input[type=file] { display: none; }
+  #preview { max-width: 80%; max-height: 35vh; border-radius: 12px; display: none; }
+  #timer { font-size: 22vw; font-variant-numeric: tabular-nums; color: #ff9a3c; }
+  #lock .pred { opacity: .5; font-size: .9rem; position: absolute; bottom: 8vh;
+    max-width: 30ch; line-height: 1.4; }
+</style>
+</head>
+<body>
+
+<section id="checkin" class="screen active">
+  <h1>Horizon Horizon</h1>
+  <p id="checkinMsg">Step outside. We'll check the time and place.</p>
+  <button id="checkBtn">I'm outside</button>
+  <button id="demoBtn" class="ghost">Demo mode (skip time check)</button>
+</section>
+
+<section id="capture" class="screen">
+  <h1>Frame the western sky</h1>
+  <p>Take a photo of where the sun is setting.</p>
+  <img id="preview" alt="">
+  <label class="btn" for="photo">Take photo</label>
+  <input id="photo" type="file" accept="image/*" capture="environment">
+  <button id="analyzeBtn" style="display:none">Read the sky</button>
+  <p id="status"></p>
+</section>
+
+<section id="lock" class="screen">
+  <div id="timer">00:00</div>
+  <div class="pred" id="pred"></div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/suncalc@1.9.0/suncalc.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const show = id => {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  $(id).classList.add("active");
+};
+
+let sunsetTime = null;
+let place = null;       // { latitude, longitude }
+let photoBlob = null;
+
+/* ---------- 1. Check-in: GPS + sunset time ---------- */
+function startCheckin(skipTimeCheck) {
+  navigator.geolocation.getCurrentPosition(pos => {
+    place = pos.coords;
+    sunsetTime = SunCalc.getTimes(new Date(), place.latitude, place.longitude).sunset;
+    const minsLeft = (sunsetTime - Date.now()) / 60000;
+    if (!skipTimeCheck && (minsLeft > 45 || minsLeft < 0)) {
+      $("checkinMsg").textContent = minsLeft > 45
+        ? `Sunset is in ${Math.round(minsLeft)} min. Come back about 15 minutes before.`
+        : "Today's sunset has passed. Try again tomorrow!";
+      return;
+    }
+    if (skipTimeCheck) sunsetTime = new Date(Date.now() + 15 * 60000);
+    show("capture");
+  }, () => {
+    $("checkinMsg").textContent = "Location is needed to find your sunset time. Please allow it.";
+  });
+}
+$("checkBtn").onclick = () => startCheckin(false);
+$("demoBtn").onclick = () => startCheckin(true);
+
+/* ---------- 2. Capture ---------- */
+$("photo").onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  photoBlob = file;
+  $("preview").src = URL.createObjectURL(file);
+  $("preview").style.display = "block";
+  $("analyzeBtn").style.display = "inline-block";
+};
+
+/* ---------- 3a. Weather: Open-Meteo (free, no key) ---------- */
+async function getWeather() {
+  const url = "https://api.open-meteo.com/v1/forecast"
+    + `?latitude=${place.latitude}&longitude=${place.longitude}`
+    + "&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,relative_humidity_2m"
+    + "&timeformat=unixtime&forecast_days=2";
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("weather request failed");
+  const h = (await res.json()).hourly;
+  // pick the hour closest to sunset
+  const target = sunsetTime.getTime() / 1000;
+  let best = 0;
+  h.time.forEach((t, i) => {
+    if (Math.abs(t - target) < Math.abs(h.time[best] - target)) best = i;
+  });
+  return {
+    low: h.cloud_cover_low[best],
+    mid: h.cloud_cover_mid[best],
+    high: h.cloud_cover_high[best],
+    hum: h.relative_humidity_2m[best]
+  };
+}
+
+/* ---------- 3b. Photo stats: read colours on a canvas ---------- */
+async function photoStats(file) {
+  const bmp = await createImageBitmap(file);
+  const size = 64;
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d");
+  ctx.drawImage(bmp, 0, 0, size, size);
+  const d = ctx.getImageData(0, 0, size, size).data;
+  let sum = 0, sumSq = 0, warm = 0;
+  const n = size * size;
+  for (let i = 0; i < d.length; i += 4) {
+    const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    sum += lum; sumSq += lum * lum;
+    warm += d[i] - d[i + 2];            // red minus blue
+  }
+  const mean = sum / n;
+  return {
+    brightness: mean,                    // 0 to 255
+    contrast: Math.sqrt(sumSq / n - mean * mean), // how patchy the sky is
+    warmth: warm / n                     // positive = warm, negative = blue
+  };
+}
+
+/* ---------- 3c. Forecast rules (contributors: improve these!) ---------- */
+function forecast(w, p) {
+  let score = 50;
+  const notes = [];
+
+  if (w) {
+    const upper = Math.max(w.mid, w.high);
+    if (w.low > 70)      { score -= 35; notes.push("thick low cloud may block the horizon"); }
+    else if (w.low > 40) { score -= 15; notes.push("some low cloud near the horizon"); }
+    if (upper >= 20 && upper <= 70) { score += 30; notes.push("higher clouds should catch the light"); }
+    else if (upper > 85)            { score -= 15; notes.push("the upper sky is mostly covered"); }
+    else if (upper < 10)            { notes.push("a very clear sky gives a gentle sunset"); }
+    if (w.hum > 85)      score -= 10;
+    else if (w.hum < 60) score += 5;
+  } else {
+    notes.push("weather data was unavailable, so this is based on your photo");
+  }
+
+  if (p) {
+    if (p.contrast > 35) { score += 8; notes.push("your photo shows broken, textured cloud"); }
+    if (p.warmth > 15)   { score += 8; notes.push("the light already looks warm"); }
+    if (p.brightness < 30) notes.push("your photo is very dark, so try framing the sky again");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  let colors;
+  if (score >= 75)      colors = "Fiery crimson and gold";
+  else if (score >= 55) colors = "Orange and pink";
+  else if (score >= 35) colors = "Soft amber and lilac";
+  else                  colors = "Muted grey with a faint amber line";
+
+  return `${colors} (${score}% vivid). ${notes.join("; ")}.`;
+}
+
+$("analyzeBtn").onclick = async () => {
+  $("analyzeBtn").disabled = true;
+  $("status").textContent = "Reading the sky...";
+  let weather = null, stats = null;
+  try { weather = await getWeather(); } catch (e) { console.warn(e); }
+  try { stats = await photoStats(photoBlob); } catch (e) { console.warn(e); }
+  goDark(forecast(weather, stats));
+};
+
+/* ---------- 4. Disappear: black screen + countdown ---------- */
+let wakeLock = null;
+async function goDark(prediction) {
+  $("pred").textContent = prediction;
+  show("lock");
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+  if (document.documentElement.requestFullscreen) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  }
+  const tick = () => {
+    const ms = sunsetTime - Date.now();
+    if (ms <= 0) {
+      $("timer").textContent = "Look up";
+      if (navigator.vibrate) navigator.vibrate([300, 150, 300]);
+      return;
+    }
+    const s = Math.floor(ms / 1000);
+    $("timer").textContent =
+      String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+    setTimeout(tick, 250);
+  };
+  tick();
+}
+document.addEventListener("visibilitychange", async () => {
+  if (wakeLock !== null && document.visibilityState === "visible"
+      && $("lock").classList.contains("active")) {
+    try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+  }
+});
+</script>
+</body>
+</html>
