@@ -1,0 +1,9 @@
+{
+  "name": "horizon-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiny proxy that forwards sky photos to Backboard",
+  "main": "server.js",
+  "scripts": { "start": "server.js" },
+  "engines": { "node": ">=18" }
+}

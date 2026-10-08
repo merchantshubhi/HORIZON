@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
 <link rel="manifest" href="manifest.json">
-<title>Horizon Horizon</title>
+<title>HORIZON</title>
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #000; color: #f5e6d3;
@@ -30,7 +30,7 @@
 <body>
 
 <section id="checkin" class="screen active">
-  <h1>Horizon Horizon</h1>
+  <h1>Horizon</h1>
   <p id="checkinMsg">Step outside. We'll check the time and place.</p>
   <button id="checkBtn">I'm outside</button>
   <button id="demoBtn" class="ghost">Demo mode (skip time check)</button>
@@ -62,6 +62,12 @@ const show = id => {
 let sunsetTime = null;
 let place = null;       // { latitude, longitude }
 let photoBlob = null;
+
+// Layer 2 (optional): paste your Render proxy URL here, e.g. "https://horizon-proxy.onrender.com"
+// Leave it empty ("") to use only the free local forecast.
+const API_URL = "";
+// Wake the free server in the background so it's ready when the photo is taken.
+if (API_URL) fetch(API_URL + "/health").catch(() => {});
 
 /* ---------- 1. Check-in: GPS + sunset time ---------- */
 function startCheckin(skipTimeCheck) {
@@ -175,13 +181,50 @@ function forecast(w, p) {
   return `${colors} (${score}% vivid). ${notes.join("; ")}.`;
 }
 
+/* ---------- 3d. Layer 2: ask the AI (optional, falls back to Layer 1) ---------- */
+async function shrink(file, maxSide = 768) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * scale);
+  c.height = Math.round(bmp.height * scale);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return new Promise(res => c.toBlob(res, "image/jpeg", 0.85));
+}
+
+async function askAI(file, w) {
+  if (!API_URL) return null;
+  const img = await shrink(file);
+  const q = w ? `?low=${w.low}&mid=${w.mid}&high=${w.high}&hum=${w.hum}` : "";
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 40000);
+  try {
+    const res = await fetch(API_URL + "/analyze" + q, {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: img,
+      signal: ctrl.signal
+    });
+    if (!res.ok) throw new Error("AI request failed: " + res.status);
+    const a = await res.json();
+    return `${a.colors} (${a.vividness}% vivid). ${a.reason}`;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 $("analyzeBtn").onclick = async () => {
   $("analyzeBtn").disabled = true;
   $("status").textContent = "Reading the sky...";
-  let weather = null, stats = null;
+  let weather = null, stats = null, aiText = null;
   try { weather = await getWeather(); } catch (e) { console.warn(e); }
   try { stats = await photoStats(photoBlob); } catch (e) { console.warn(e); }
-  goDark(forecast(weather, stats));
+  if (API_URL) {
+    $("status").textContent = "Asking the AI to read your sky (up to 40 seconds)...";
+    try { aiText = await askAI(photoBlob, weather); }
+    catch (e) { console.warn("AI unavailable, using the local forecast", e); }
+  }
+  goDark(aiText || forecast(weather, stats));
 };
 
 /* ---------- 4. Disappear: black screen + countdown ---------- */
