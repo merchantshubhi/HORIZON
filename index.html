@@ -65,7 +65,7 @@ let photoBlob = null;
 
 // Layer 2 (optional): paste your Render proxy URL here, e.g. "https://horizon-proxy.onrender.com"
 // Leave it empty ("") to use only the free local forecast.
-const API_URL = "";
+const API_URL = "https://horizon-v3jf.onrender.com/";
 // Wake the free server in the background so it's ready when the photo is taken.
 if (API_URL) fetch(API_URL + "/health").catch(() => {});
 
